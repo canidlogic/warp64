@@ -4,13 +4,13 @@ Warp64 is a binary scrambling algorithm.
 
 Warp64 will scramble digital data so that it can't be opened.  Warp64 is then later able to descramble digital data back to its original state so that it can be opened again.  During scrambling, a _key_ of one or more base-64 characters must be provided.  A matching key must be used during descrambling to get the original data back.
 
-__Warp64 is NOT encryption.  Do not use Warp64 in applications that require data be securely encrypted.__  By design, it is easy to recover lost keys, so you can't rely on keys to provide any sort of security whatsoever.  Warp64 is intended for applications where you want to alter the data such that it can't be accidentally opened while scrambled, but you don't want to worry about losing data due to forgotten encryption keys.
+__Warp64 is NOT encryption.  Do not use Warp64 in applications that require data be securely encrypted.__  By design, it is trivial to recover lost keys, so you can't rely on keys to provide any sort of security whatsoever.  Warp64 is intended for applications where you want to alter the data such that it can't be accidentally opened while scrambled, but you don't want to worry about losing data due to forgotten encryption keys.
 
 Also, __Warp64 may not work on raw, uncompressed multimedia streams.__  This refers to file types such as raw PCM sound recordings without any header, or raw RGB files without any headers.  (Such files are not typically used for storage.)  If a file has any sort of headers (which is usually the case), then Warp64 should work because the headers will be scrambled.  It's only in the unusual case when you're dealing with sampling streams that don't have a header when Warp64 may fail to make the file impossible to open, because in these cases the transformations that Warp64 applies might just show up as a bit of noise.  Raw text files should always work with Warp64, though, even if they don't have any sort of header.
 
 ## Key normalization
 
-Both scrambling and descrambling require a key to be provided.  This key is a sequence of one or more base-64 characters.  _Key normalization_ takes this sequence of base-64 characters and normalizes it into exactly four base-64 characters using the normalization algorithm described in this section.
+Both scrambling and descrambling require a key to be provided.  This key is a sequence of one or more base-64 characters.  _Key normalization_ takes this sequence of base-64 characters and normalizes it into exactly three octets using the normalization algorithm described in this section.
 
 Base-64 characters are chosen from the following alphabet of 64 characters:
 
@@ -45,17 +45,17 @@ Once the mixed key is obtained, the third step in key normalization is to perfor
     r_1 := 2
     r_2 := 4
 
-The fourth and final step in key normalization is to encode the three octets of the replaced mixed key as exactly four base-64 digits.
+The mixed key with replacement formed is then the result of the key normalization process.
 
 ## Scrambling algorithm
 
 The input is a sequence of zero or more binary octets, as well as a sequence of one or more base-64 characters that will serve as the scrambling key.
 
-The provided scrambling key is first normalized into exactly four base-64 digits using the key normalization algorithm described above.
+The input is first prefixed with eight octets that serve as a method for validating scrambling keys during descrambling.  The first seven octets can be anything; it is recommended to use the current system time expressed as the number of seconds since the Unix epoch at midnight GMT at the start of January 1, 1970.  The eighth octet must be chosen such that when all eight octets are added together as unsigned integers, that value modulo 256 must be zero.
 
-Second, the normalized scrambling key is decoded into exactly three non-zero octets `z_0` `z_1` `z_2` using base-64 decoding.
+Second, the provided scrambling key is normalized into exactly three octets using the key normalization algorithm described previously.  Let `z_0` `z_1` and `z_2` be the three octets of the normalized key.
 
-Third, each octet of input is scrambled in the following way.  Let `t_0` `t_1` ... `t_n` be the octets of the input.  Then, define the scrambled octets `v_0` `v_1` ... `v_n` as follows:
+Third, each octet of input is scrambled in the following way.  Let `t_0` `t_1` ... `t_n` be the octets of the input, which includes the eight octets prefixed in the first step.  Then, define the scrambled octets `v_0` `v_1` ... `v_n` as follows:
 
     v_i := (t_i + z_(i MOD 3)) MOD 256
 
@@ -63,20 +63,20 @@ The output of the scrambling algorithm is the scrambled octets.
 
 ## Descrambling algorithm
 
-The input is a sequence of zero or more binary octets, as well as a sequence of one or more base-64 characters that was used as the scrambling key.
+The input is a sequence of eight or more binary octets, as well as a sequence of one or more base-64 characters that was used as the scrambling key.  Since scrambled data always has an eight-octet prefix, the length of scrambled input must always be at least eight.
 
-The provided scrambling key is first normalized into exactly four base-64 digits using the key normalization algorithm described above.
+The provided scrambling key is first normalized into exactly three octets `z_0` `z_1` `z_2` using the key normalization algorithm described previously.
 
-Second, the normalized scrambling key is decoded into exactly three non-zero octets `z_0` `z_1` `z_2` using base-64 decoding.
-
-Third, the normalized scrambling key octets are transformed into descrambling octets `w_0` `w_1` `w_2` using the following formula:
+Second, the normalized scrambling key octets are transformed into descrambling octets `w_0` `w_1` `w_2` using the following formula:
 
     w_j := 256 - z_j
 
 (Normalized scrambling key octets are never zero, so the result of this formula will always remain in range [1, 255].)
 
-Fourth, each octet of input is descrambled in the following way.  Let `v_0` `v_1` ... `v_n` be the octets of the input.  Then, define the descrambled octets `t_0` `t_1` ... `t_n` as follows:
+Third, each octet of input is descrambled in the following way.  Let `v_0` `v_1` ... `v_n` be the octets of the input.  Then, define the descrambled octets `t_0` `t_1` ... `t_n` as follows:
 
     t_i := (v_i + w_(i MOD 3)) MOD 256
 
-The output of the descrabmling algorithm is the descrambled octets.  It the same scrambling key was provided to the descrambling algorithm that was used during scrambling, then the descrambled octets will be exactly the same as the original octets prior to scrambling.
+Fourth, the unsigned values of the first eight descrambled octets are added together.  The summed result modulo 256 must be zero, or otherwise the wrong scrambling key was provided.
+
+The descrambled output is anything that follows the first eight octets.
