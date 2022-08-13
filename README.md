@@ -51,11 +51,11 @@ The mixed key with replacement formed is then the result of the key normalizatio
 
 The input is a sequence of zero or more binary octets, as well as a sequence of one or more base-64 characters that will serve as the scrambling key.
 
-The input is first prefixed with eight octets that serve as a method for validating scrambling keys during descrambling.  The first seven octets can be anything; it is recommended to use the current system time expressed as the number of seconds since the Unix epoch at midnight GMT at the start of January 1, 1970.  The eighth octet must be chosen such that when all eight octets are added together as unsigned integers, that value modulo 256 must be zero.
+The input is first suffixed with eight octets that serve as a method for validating scrambling keys during descrambling.  The first seven of these octets can be anything; it is recommended to use the current system time expressed as the number of seconds since the Unix epoch at midnight GMT at the start of January 1, 1970.  The eighth octet must be chosen such that when all eight octets are added together as unsigned integers, that value modulo 256 must be zero.
 
 Second, the provided scrambling key is normalized into exactly three octets using the key normalization algorithm described previously.  Let `z_0` `z_1` and `z_2` be the three octets of the normalized key.
 
-Third, each octet of input is scrambled in the following way.  Let `t_0` `t_1` ... `t_n` be the octets of the input, which includes the eight octets prefixed in the first step.  Then, define the scrambled octets `v_0` `v_1` ... `v_n` as follows:
+Third, each octet of input is scrambled in the following way.  Let `t_0` `t_1` ... `t_n` be the octets of the input, which includes the eight octets suffixed at the end in the first step.  Then, define the scrambled octets `v_0` `v_1` ... `v_n` as follows:
 
     v_i := (t_i + z_(i MOD 3)) MOD 256
 
@@ -77,6 +77,6 @@ Third, each octet of input is descrambled in the following way.  Let `v_0` `v_1`
 
     t_i := (v_i + w_(i MOD 3)) MOD 256
 
-Fourth, the unsigned values of the first eight descrambled octets are added together.  The summed result modulo 256 must be zero, or otherwise the wrong scrambling key was provided.
+Fourth, the unsigned values of the last eight descrambled octets are added together.  The summed result modulo 256 must be zero, or otherwise the wrong scrambling key was provided.
 
-The descrambled output is anything that follows the first eight octets.
+The descrambled output is anything that precedes the last eight octets.
