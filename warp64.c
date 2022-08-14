@@ -11,14 +11,15 @@
  * 
  * -s is scrambling mode.  The scrambled file will be written to a path
  * that is the same as the input path, except with ".warp64" suffixed.
- * The output path is overwritten if it already exists, and if the
- * operation is successful, the original file is deleted at the end.
  * 
  * -d is descrambling mode.  The input file path must end with
  * ".warp64".  The output path is the same as the input path, except
- * that ".warp64" is dropped from the end of it.  The output path is NOT
- * overwritten if it already exists, and the scrambled file is NOT
- * deleted.
+ * that ".warp64" is dropped from the end of it.
+ * 
+ * For both scrambling and descrambling, the output file path must NOT
+ * exist yet or the program will fail.  For both scrambling and
+ * descrambling, if the operation is successful, the input file will be
+ * deleted at the end of the operation.
  * 
  * The scrambling key will be requested and then read from the console,
  * so that it is not stored in the console history.
@@ -31,10 +32,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 /* POSIX headers */
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <termios.h>
 #include <unistd.h>
@@ -69,6 +70,12 @@
 
 /*
  * The target number of bytes for the memory-mapped window.
+ * 
+ * The actual size of a memory-mapped window is computed at the start of
+ * the entrypoint and stored in m_winsize.
+ * 
+ * m_winsize is the actual memory-mapped window size.  WINDOW_TARGET is
+ * only used near the start of the entrypoint for computing m_winsize.
  */
 #define WINDOW_TARGET (4194304L)
 
@@ -78,10 +85,17 @@
  */
 
 /*
- * Stores a null-terminated scrambling key.
+ * Stores a nul-terminated scrambling key.
  */
 typedef struct {
+
+  /*
+   * Buffer holding the scrambling key that was read.
+   * 
+   * The key must be nul-terminated.
+   */
   char kbuf[MAX_KEY_LENGTH + 1];
+
 } KEY_BUFFER;
 
 /*
@@ -109,9 +123,17 @@ static size_t m_winsize = 0;
  */
 
 /* Prototypes */
-static int readKey(KEY_BUFFER *kb);
 static int decode64(int c);
+static int readKey(KEY_BUFFER *kb);
 static int32_t deriveKey(const char *pKey);
+
+static int process64(
+    int     fIn,
+    int     fOut,
+    int32_t key,
+    int     trailer,
+    int64_t olen);
+
 static int warp64(
     const char * pInputPath,
     const char * pOutputPath,
@@ -119,11 +141,49 @@ static int warp64(
     const char * pKey);
 
 /*
+ * Given a character code c, return the decoded base-64 value.
+ * 
+ * Parameters:
+ * 
+ *   c - the character code
+ * 
+ * Return:
+ * 
+ *   the base-64 value, or -1 if the given character code wasn't for a
+ *   base-64 digit
+ */
+static int decode64(int c) {
+  int result = 0;
+  
+  if ((c >= 'A') && (c <= 'Z')) {
+    result = c - 'A';
+    
+  } else if ((c >= 'a') && (c <= 'z')) {
+    result = (c - 'a') + 26;
+    
+  } else if ((c >= '0') && (c <= '9')) {
+    result = (c - '0') + 52;
+    
+  } else if (c == '+') {
+    result = 62;
+    
+  } else if (c == '/') {
+    result = 63;
+    
+  } else {
+    result = -1;
+  }
+  
+  return result;
+}
+
+/*
  * Read the scrambling key from standard input, suppressing echo so that
  * the key is not displayed.
  * 
- * Error messages are printed if failure.  This function will also check
- * that each character read decodes with decode64().
+ * Error messages are printed if failure.  This function will check that
+ * each character read decodes with decode64(), and that at least one
+ * and at most MAX_KEY_LENGTH characters are read.
  * 
  * Parameters:
  * 
@@ -172,12 +232,12 @@ static int readKey(KEY_BUFFER *kb) {
     }
   }
   
-  /* Update console input immediately to disable echo and set the
+  /* Update console input immediately to disable echo and then set the
    * console_changed flag */
   if (status) {
     if (tcsetattr(STDIN_FILENO, TCSANOW, &new_attr)) {
       status = 0;
-      fprintf(stderr, "%s: Failed to update console attributes!\n",
+      fprintf(stderr, "%s: Failed to set console input attributes!\n",
                 pModule);
       fprintf(stderr, "%s: Make sure input is not redirected.\n",
               pModule);
@@ -216,7 +276,7 @@ static int readKey(KEY_BUFFER *kb) {
     
     /* If current character is nul or greater than 128, set it to 128
      * (which is also an invalid character) */
-    if (status && ((c == 0) || (c > 128))) {
+    if (status && ((c < 0) || (c > 128))) {
       c = 128;
     }
     
@@ -245,7 +305,7 @@ static int readKey(KEY_BUFFER *kb) {
     for(i = 0; i < chars_read; i++) {
       if (decode64((kb->kbuf)[i]) < 0) {
         status = 0;
-        fprintf(stderr, "%s: Key may only include A-Za-z0-9+/\n",
+        fprintf(stderr, "%s: Key may only include A-Z a-z 0-9 + /\n",
                   pModule);
         break;
       }
@@ -270,43 +330,6 @@ static int readKey(KEY_BUFFER *kb) {
   
   /* Return status */
   return status;
-}
-
-/*
- * Given a character code c, return the decoded base-64 value.
- * 
- * Parameters:
- * 
- *   c - the character code
- * 
- * Return:
- * 
- *   the base-64 value, or -1 if the given character code wasn't for a
- *   base-64 digit
- */
-static int decode64(int c) {
-  int result = 0;
-  
-  if ((c >= 'A') && (c <= 'Z')) {
-    result = c - 'A';
-    
-  } else if ((c >= 'a') && (c <= 'z')) {
-    result = (c - 'a') + 26;
-    
-  } else if ((c >= '0') && (c <= '9')) {
-    result = (c - '0') + 52;
-    
-  } else if (c == '+') {
-    result = 62;
-    
-  } else if (c == '/') {
-    result = 63;
-    
-  } else {
-    result = -1;
-  }
-  
-  return result;
 }
 
 /*
@@ -483,6 +506,255 @@ static int32_t deriveKey(const char *pKey) {
 }
 
 /*
+ * Use memory-mapping to perform Warp64 scrambling or descrambling.
+ * 
+ * fIn and fOut are the file descriptors for the input file and the
+ * output file, respectively.
+ * 
+ * key contains the scrambling or descrambling key in the 24 least
+ * significant bits.  If you are scrambling, this should be equal to the
+ * normalized scrambling key.  If you are descrambling, each component
+ * byte should be adjusted to invert the scrambling process.
+ * 
+ * trailer is non-zero if the input should be treated as if it had three
+ * octets of zero value suffixed to it.  This should be set during
+ * scrambling so that the trailer gets written.
+ * 
+ * olen is the length in bytes of the output file.  For scrambling, this
+ * includes the three trailer bytes.  olen must be greater than zero.
+ * If trailer is non-zero, olen must be at least three.
+ * 
+ * Error messages are printed.
+ * 
+ * Parameters:
+ * 
+ *   fIn - the input file descriptor
+ * 
+ *   fOut - the output file descriptor
+ * 
+ *   key - the (de)scrambling key
+ * 
+ *   trailer - non-zero for three extra zero octets after input
+ * 
+ *   olen - the length of output in bytes
+ * 
+ * Return:
+ * 
+ *   non-zero if successful, zero if error
+ */
+static int process64(
+    int     fIn,
+    int     fOut,
+    int32_t key,
+    int     trailer,
+    int64_t olen) {
+  
+  int status = 1;
+  int32_t i = 0;
+  int32_t j = 0;
+  int k = 0;
+  
+  int64_t base = 0;
+  int64_t remc = 0;
+  int64_t remi = 0;
+  
+  int32_t ws = 0;
+  int32_t wsi = 0;
+  
+  uint8_t kb[3];
+  uint8_t *pd[3];
+  uint8_t *pwo = NULL;
+  uint8_t *pwi = NULL;
+  
+  /* Initialize arrays */
+  memset(kb, 0, 3);
+  
+  memset(pd, 0, sizeof(uint8_t *) * 3);
+  pd[0] = NULL;
+  pd[1] = NULL;
+  pd[2] = NULL;
+  
+  /* Check parameters */
+  if ((fIn < 0) || (fOut < 0) || (olen < 1)) {
+    abort();
+  }
+  if (trailer && (olen < 3)) {
+    abort();
+  }
+  
+  /* Unpack key into buffer */
+  kb[0] = (uint8_t) ((key >> 16) & 0xff);
+  kb[1] = (uint8_t) ((key >>  8) & 0xff);
+  kb[2] = (uint8_t) ( key        & 0xff);
+  
+  /* Allocate and initialize the key dictionaries */
+  for(i = 0; i < 3; i++) {
+    /* Allocate key dictionary */
+    pd[i] = (uint8_t *) calloc(256, 1);
+    if (pd[i] == NULL) {
+      abort();
+    }
+    
+    /* Initialize entries according to the proper key component */
+    for(j = 0; j < 256; j++) {
+      (pd[i])[j] = (uint8_t) ((j + ((int) kb[i])) % 256);
+    }
+  }
+  
+  /* Start at offset zero in output and initialize remaining byte count
+   * to the given size of output */
+  base = 0;
+  remc = olen;
+  
+  /* Remaining input is same as remaining output byte count, except when
+   * trailer is active, in which case remaining input is three less than
+   * remaining output */
+  remi = remc;
+  if (trailer) {
+    remi = remi - 3;
+  }
+  
+  /* Keep processing until we have no bytes left */
+  while (status && (remc > 0)) {
+    /* First, determine the size of the current window we are dealing
+     * with; this is the minimum of the window size and the remaining
+     * bytes */
+    ws = (int32_t) m_winsize;
+    if (remc < ws) {
+      ws = (int32_t) remc;
+    }
+    
+    /* Second, determine the size of the current input window; this is
+     * the minimum of the current output window and the remaining input
+     * count; it might be zero */
+    wsi = ws;
+    if (remi < wsi) {
+      wsi = (int32_t) remi;
+    }
+    
+    /* Map the current output window */
+    pwo = (uint8_t *) mmap(
+                        NULL,
+                        (size_t) ws,
+                        PROT_READ | PROT_WRITE,
+                        MAP_SHARED,
+                        fOut,
+                        (off_t) base);
+    if ((pwo == MAP_FAILED) || (pwo == NULL)) {
+      status = 0;
+      fprintf(stderr, "%s: Failed to map output window!\n", pModule);
+    }
+    
+    /* Map the current input window if non-empty */
+    if (status && (wsi > 0)) {
+      pwi = (uint8_t *) mmap(
+                          NULL,
+                          (size_t) wsi,
+                          PROT_READ,
+                          MAP_PRIVATE,
+                          fIn,
+                          (off_t) base);
+      if ((pwi == MAP_FAILED) || (pwi == NULL)) {
+        status = 0;
+        fprintf(stderr, "%s: Failed to map input window!\n", pModule);
+      }
+    }
+    
+    /* Compute all the bytes in the current output window */
+    if (status) {
+      /* Start the byte dictionary index out at the proper position for
+       * the first byte of the window */
+      k = (int) (base % 3);
+      
+      /* Compute all bytes */
+      for(i = 0; i < ws; i++) {
+    
+        /* Read the current byte value from the input window, unless i
+         * is outside the range of the current input window, in which
+         * case just use a byte value of zero (for the trailer) */
+        j = 0;
+        if (i < wsi) {
+          j = (int32_t) pwi[i];
+        }
+    
+        /* Replace current byte value in output with its value from the
+         * byte dictionary */
+        j = (int32_t) ((pd[k])[j]);
+        
+        /* Increment byte dictionary index and apply mod-3 */
+        k = ((k + 1) % 3);
+    
+        /* Write the transformed byte value to output window */
+        pwo[i] = (uint8_t) j;
+      }
+    }
+    
+    /* Unmap current input window if it was mapped */
+    if (status && (wsi > 0)) {
+      if (munmap(pwi, (size_t) wsi)) {
+        status = 0;
+        fprintf(stderr, "%s: Failed to unmap input window!\n",
+                pModule);
+      }
+      pwi = NULL;
+    }
+    
+    /* Unmap current output window */
+    if (status) {
+      if (munmap(pwo, (size_t) ws)) {
+        status = 0;
+        fprintf(stderr, "%s: Failed to unmap output window!\n",
+                pModule);
+      }
+      pwo = NULL;
+    }
+    
+    /* Update base remc and remi before going around again */
+    if (status) {
+      base = base + ((int64_t) ws);
+      remc = remc - ((int64_t) ws);
+      remi = remi - ((int64_t) ws);
+      if (remi < 0) {
+        remi = 0;
+      }
+    }
+  }
+  
+  /* If input window is mapped, unmap it */
+  if (pwi != NULL) {
+    if (munmap(pwi, (size_t) wsi)) {
+      fprintf(stderr, "%s: Failed to unmap input window!\n", pModule);
+    }
+    pwi = NULL;
+  }
+  
+  /* If output window is mapped, unmap it */
+  if (pwo != NULL) {
+    if (munmap(pwo, (size_t) ws)) {
+      fprintf(stderr, "%s: Failed to unmap output window!\n", pModule);
+    }
+    pwo = NULL;
+  }
+  
+  /* Release byte dictionaries if allocated */
+  if (pd[0] != NULL) {
+    free(pd[0]);
+    pd[0] = NULL;
+  }
+  if (pd[1] != NULL) {
+    free(pd[1]);
+    pd[1] = NULL;
+  }
+  if (pd[2] != NULL) {
+    free(pd[2]);
+    pd[2] = NULL;
+  }
+  
+  /* Return status */
+  return status;
+}
+
+/*
  * Perform the main program given all the necessary parameters.
  * 
  * Parameters:
@@ -506,24 +778,25 @@ static int warp64(
     const char * pKey) {
   
   int status = 1;
-  int i;
+  int i = 0;
+  int z = 0;
   
-  int32_t cks = 0;
   int32_t key = 0;
-  int64_t tval = 0;
-  
-  int64_t ilen = 0;
-  int64_t olen = 0;
+  int32_t tk = 0;
   int64_t ctlen = 0;
+  int64_t olen = 0;
   
-  uint8_t head[8];
+  uint8_t trailer[3];
+  uint8_t kb[3];
+  uint8_t dummy = 0;
   
   int new_file = 0;
   int fIn = -1;
   int fOut = -1;
   
   /* Initialize structures */
-  memset(head, 0, 8);
+  memset(trailer, 0, 3);
+  memset(kb, 0, 3);
   
   /* Check parameters */
   if ((pInputPath == NULL) || (pOutputPath == NULL) || (pKey == NULL)) {
@@ -536,64 +809,6 @@ static int warp64(
     status = 0;
   }
   
-  /* If this is scrambling mode, define the header */
-  if (status && (!descramble)) {
-    /* Get the current timestamp */
-    if (status) {
-      tval = (int64_t) time(NULL);
-      if (tval < 0) {
-        status = 0;
-        fprintf(stderr, "%s: Failed to read current time!\n", pModule);
-      }
-    }
-    
-    /* Only deal with the 32 least significant bits of the timestamp, so
-     * that the first three bytes of the header remain zero */
-    if (status) {
-      tval = tval & INT64_C(0xffffffff);
-    }
-    
-    /* Unpack the timestamp into the head array in big-endian order,
-     * except rotate left once such that the first byte is the second
-     * most significant, the last byte is the most significant, and the
-     * second from last byte is the least significant */
-    if (status) {
-      head[7] = (uint8_t) ((tval >> 56) & 0xff);
-      head[0] = (uint8_t) ((tval >> 48) & 0xff);
-      head[1] = (uint8_t) ((tval >> 40) & 0xff);
-      head[2] = (uint8_t) ((tval >> 32) & 0xff);
-      head[3] = (uint8_t) ((tval >> 24) & 0xff);
-      head[4] = (uint8_t) ((tval >> 16) & 0xff);
-      head[5] = (uint8_t) ((tval >>  8) & 0xff);
-      head[6] = (uint8_t) ( tval        & 0xff);
-    }
-    
-    /* Get the sum of the first seven bytes of the header */
-    if (status) {
-      cks = 0;
-      for(i = 0; i < 7; i++) {
-        cks = cks + ((int32_t) head[i]);
-      }
-    }
-    
-    /* Take the sum MOD 256, and then determine what must be added to
-     * make the MOD 256 sum zero */
-    if (status) {
-      cks = cks % 256;
-      if (cks != 0) {
-        cks = 256 - cks;
-      }
-    }
-    
-    /* Overwrite the last header byte (which should normally be zero
-     * because it's the most significant byte of the time) with the
-     * checksum byte so that the sum of all header bytes MOD 256 is
-     * zero */
-    if (status) {
-      head[7] = (uint8_t) cks;
-    }
-  }
-  
   /* Open the input file for reading */
   if (status) {
     fIn = open(pInputPath, O_RDONLY);
@@ -603,42 +818,12 @@ static int warp64(
     }
   }
   
-  /* Open the output file for writing; in descrambling mode, do not
-   * allow existing files to be overwritten, but overwrite is OK in
-   * scrambling mode; set new_file flag if successfully created a new
-   * file */
-  if (status) {
-    if (descramble) {
-      fOut = open(pOutputPath, O_RDWR | O_CREAT | O_EXCL,
-                  S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-      if (fOut < 0) {
-        status = 0;
-        fprintf(stderr, "%s: Failed to open '%s'!\n",
-                pModule, pOutputPath);
-        fprintf(stderr, "%s: Check that '%s' does not exist.\n",
-                pModule, pOutputPath);
-      }
-      
-    } else {
-      fOut = open(pOutputPath, O_RDWR | O_CREAT | O_TRUNC,
-                  S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-      if (fOut < 0) {
-        status = 0;
-        fprintf(stderr, "%s: Failed to open '%s'!\n",
-                pModule, pOutputPath);
-      }
-    }
-    if (status) {
-      new_file = 1;
-    }
-  }
-  
   /* Get the length of the input file */
   if (status) {
-    ilen = (int64_t) lseek(fIn, 0, SEEK_END);
-    if (ilen < 0) {
+    ctlen = (int64_t) lseek(fIn, 0, SEEK_END);
+    if (ctlen < 0) {
       status = 0;
-      fprintf(stderr, "%s: Failed to measure '%s'!\n",
+      fprintf(stderr, "%s: Failed to get length of '%s'!\n",
               pModule, pInputPath);
     }
   }
@@ -651,62 +836,99 @@ static int warp64(
   }
   
   /* If this is descrambling mode, then input file length must be at
-   * least eight and then content length is eight less than input file;
-   * else, content length is equal to input file */
+   * least three and then content length is three less than input file;
+   * else, leave content length equal to input file length */
   if (status && descramble) {
-    if (ilen < 8) {
+    if (ctlen < 3) {
       status = 0;
-      fprintf(stderr, "%s: Missing header in '%s'!\n",
+      fprintf(stderr, "%s: Missing trailer in '%s'!\n",
               pModule, pInputPath);
     }
     if (status) {
-      ctlen = ilen - 8;
+      ctlen = ctlen - 3;
     }
-  
-  } else if (status && (!descramble)) {
-    ctlen = ilen;
-  
-  } else if (status) {
-    abort();
   }
   
-  /* If this is descrambling mode, then read the last eight bytes and
-   * verify the descrambled header */
+  /* If this is descrambling mode, then read the last three bytes and
+   * verify the descrambled trailer bytes are zero to check the key */
   if (status && descramble) {
-    /* Read the last eight bytes into head */
-    if (lseek(fIn, -8, SEEK_END) < 0) {
+    /* Read the last three bytes into trailer */
+    if (lseek(fIn, -3, SEEK_END) < 0) {
       status = 0;
-      fprintf(stderr, "%s: Failed to read trailer!\n", pModule);
+      fprintf(stderr, "%s: Failed to seek to trailer in '%s'!\n",
+              pModule, pInputPath);
     }
     
     if (status) {
-      if (read(fIn, head, 8) != 8) {
+      if (read(fIn, trailer, 3) != 3) {
         status = 0;
-        fprintf(stderr, "%s: Failed to read trailer!\n", pModule);
+        fprintf(stderr, "%s: Failed to read trailer in '%s'!\n",
+              pModule, pInputPath);
       }
     }
     
     if (status) {
       if (lseek(fIn, 0, SEEK_SET) != 0) {
         status = 0;
-        fprintf(stderr, "%s: Failed to read trailer!\n", pModule);
+        fprintf(stderr, "%s: Failed to rewind '%s'!\n",
+              pModule, pInputPath);
       }
     }
     
     /* Figure out the index of the scrambling key to use for the first
      * byte of the head */
     if (status) {
-      i = (int) ((olen - 8) % 3);
+      z = (int) (3 - ((ctlen - 3) % 3));
+    }
+    
+    /* Pack the properly re-ordered trailer bytes into an integer to
+     * figure out the normalized key that must be used */
+    if (status) {
+      tk = 0;
+      for(i = 0; i < 3; i++) {
+        tk = (tk << 8) | ((int32_t) trailer[(z + i) % 3]);
+      }
+    }
+    
+    /* Verify that the provided scrambling key is correct */
+    if (status) {
+      if (key != tk) {
+        status = 0;
+        fprintf(stderr, "%s: Incorrect scrambling key!\n", pModule);
+      }
     }
   }
   
+  /* Open the output file for writing; do not allow existing files to be
+   * overwritten; set new_file flag if successfully created a new 
+   * file */
+  if (status) {
+    fOut = open(pOutputPath, O_RDWR | O_CREAT | O_EXCL,
+                S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+    if (fOut < 0) {
+      status = 0;
+      fprintf(stderr, "%s: Failed to create '%s'!\n",
+              pModule, pOutputPath);
+      fprintf(stderr, "%s: Check that '%s' does not exist.\n",
+              pModule, pOutputPath);
+    }
+
+    if (status) {
+      new_file = 1;
+    }
+  }
   
   /* Compute length of output file based on content length */
   if (status && descramble) {
     olen = ctlen;
     
   } else if (status && (!descramble)) {
-    olen = ctlen + 8;
+    if (ctlen <= INT64_MAX - 3) {
+      olen = ctlen + 3;
+    } else {
+      status = 0;
+      fprintf(stderr, "%s: Output file length overflow!\n", pModule);
+    }
     
   } else if (status) {
     abort();
@@ -723,7 +945,7 @@ static int warp64(
       }
     }
     if (status) {
-      if (write(fOut, &(head[0]), 1) != 1) {
+      if (write(fOut, &dummy, 1) != 1) {
         status = 0;
         fprintf(stderr, "%s: Failed to set output length!\n", pModule);
       }
@@ -734,10 +956,47 @@ static int warp64(
         fprintf(stderr, "%s: Failed to set output length!\n", pModule);
       }
     }
+    
+    /* If we are descrambling, turn the scrambling key into a
+     * descrambling key */
+    if (status && descramble) {
+      
+      /* Unpack the key into a buffer */
+      kb[0] = (uint8_t) ((key >> 16) & 0xff);
+      kb[1] = (uint8_t) ((key >>  8) & 0xff);
+      kb[2] = (uint8_t) ( key        & 0xff);
+      
+      /* Invert each component byte */
+      for(i = 0; i < 3; i++) {
+        /* Component byte should not be zero */
+        if (kb[i] == 0) {
+          abort();
+        }
+        
+        /* Invert component byte */
+        kb[i] = (uint8_t) (256 - ((int) kb[i]));
+      }
+      
+      /* Pack buffer back into key */
+      key =   (((int32_t) kb[0]) << 16)
+            | (((int32_t) kb[1]) <<  8)
+            | ( (int32_t) kb[2]       );
+    }
   
-  
-  
-    /* @@TODO: */
+    /* Process the file */
+    if (status && descramble) {
+      if (!process64(fIn, fOut, key, 0, olen)) {
+        status = 0;
+      }
+      
+    } else if (status && (!descramble)) {
+      if (!process64(fIn, fOut, key, 1, olen)) {
+        status = 0;
+      }
+      
+    } else if (status) {
+      abort();
+    }
   }
   
   /* Close open file handles */
@@ -762,7 +1021,15 @@ static int warp64(
     }
   }
   
-  /* @@TODO: */
+  /* If we got here successfully, remove the input file */
+  if (status) {
+    if (unlink(pInputPath)) {
+      fprintf(stderr, "%s: Failed to remove input file!\n", pModule);
+    }
+  }
+  
+  /* Return status */
+  return status;
 }
 
 /*
