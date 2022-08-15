@@ -1,0 +1,912 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8"/>
+    <title>Warp64</title>
+    <meta name="viewport" 
+      content="width=device-width, initial-scale=1.0"/>
+    <style>
+
+body {
+  max-width: 20em;
+  margin-left: auto;
+  margin-right: auto;
+  padding-left: 0.5em;
+  padding-right: 0.5em;
+  margin-top: 2.5em;
+  margin-bottom: 5em;
+  font-family: sans-serif;
+  color: black;
+  background-color: whitesmoke;
+}
+
+:link {
+  color: blue;
+  text-decoration: none;
+}
+
+:visited {
+  color: blue;
+  text-decoration: none;
+}
+
+.tt {
+  font-family: monospace;
+}
+
+.clsLabel {
+  margin-top: 1em;
+}
+
+.clsControl {
+  margin-top: 0.5em;
+}
+
+.clsControl input {
+  padding: 0.5em;
+}
+
+.clsErrorBox {
+  margin-top: 1em;
+  margin-bottom: 1em;
+  padding: 1em;
+  border: medium solid;
+  background-color: white;
+  font-family: serif;
+}
+
+.clsErrorMessage {
+  font-weight: bold;
+  color: red;
+  font-size: larger;
+  font-family: sans-serif;
+}
+
+.clsErrorDesc {
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+}
+
+.clsCloseError {
+  margin-top: 0.5em;
+}
+
+.clsPanel {
+  margin-top: 1em;
+}
+
+.clsPanel input {
+  padding: 0.5em;
+}
+
+#divResult {
+  margin-top: 1em;
+  margin-bottom: 1em;
+  padding: 1em;
+  border: medium solid;
+  background-color: white;
+  font-size: larger;
+  text-align: center;
+}
+
+#divCloseResult {
+  font-size: smaller;
+  margin-top: 2em;
+}
+
+    </style>
+    <script>
+    
+// Wrap everything in an anonymous function that we immediately invoke
+// after it is declared -- this prevents anything from being implicitly
+// added to global scope
+(function() {
+  
+  /*
+   * Fault function
+   * ==============
+   */
+  
+  /*
+   * Report an error to console and throw an exception for a fault
+   * occurring within this module.
+   *
+   * Parameters:
+   *
+   *   func_name : string - the name of the function in this module
+   *
+   *   loc : number(int) - the location within the function
+   */
+  function fault(func_name, loc) {
+    
+    // If parameters not valid, set to unknown:0
+    if ((typeof func_name !== "string") || (typeof loc !== "number")) {
+      func_name = "unknown";
+      loc = 0;
+    }
+    loc = Math.floor(loc);
+    if (!isFinite(loc)) {
+      loc = 0;
+    }
+    
+    // Report error to console
+    console.log("Fault at " + func_name + ":" + String(loc) +
+                  " in warp64.html");
+    
+    // Throw exception
+    throw ("warp64:" + func_name + ":" + String(loc));
+  }
+  
+  /*
+   * Constants
+   * =========
+   */
+  
+  /*
+   * An array storing the IDs of all the error DIVs, excluding the
+   * <noscript> error box.
+   */
+  var ERROR_DIVS = [
+    "divKeyError",
+    "divWrongError",
+    "divBadError",
+    "divSelError",
+    "divAbortError",
+    "divReadError",
+    "divStopError",
+    "divProcError"
+  ];
+  
+  /*
+   * The usual Warp64 file suffix.
+   */
+  var WARP_SUFFIX = ".warp64";
+  
+  /*
+   * Local data
+   * ==========
+   */
+  
+  /*
+   * Flag that is set to true if button events should be ignored.
+   */
+  var m_suppress = false;
+  
+  /*
+   * The currently active file reader for purposes of signaling aborts,
+   * or undefined if no currently active file reader.
+   */
+  var m_fr = undefined;
+  
+  /*
+   * The currently active worker, or undefined if no currently active
+   * worker.
+   */
+  var m_worker = undefined;
+  
+  /*
+   * The object URL for the result, or empty string if no result
+   * currently available.
+   */
+  var m_result = "";
+  
+  /*
+   * Local functions
+   * ===============
+   */
+  
+  /*
+   * Given a one-character string, return the decoded base-64 value.
+   *
+   * Parameters:
+   *
+   *   c : string - a one-character string
+   *
+   * Return:
+   *
+   *   the numeric base-64 value or -1 if this isn't a base-64 digit
+   */
+  function decode64(c) {
+    var func_name = "decode64";
+    var result;
+    
+    // Check parameter
+    if (typeof(c) !== "string") {
+      fault(func_name, 100);
+    }
+    if (c.length !== 1) {
+      fault(func_name, 101);
+    }
+    
+    // Get the character code
+    c = c.charCodeAt(0);
+    
+    // Decode
+    if ((c >= 0x41) && (c <= 0x5a)) {
+      result = c - 0x41;
+      
+    } else if ((c >= 0x61) && (c <= 0x7a)) {
+      result = (c - 0x61) + 26;
+      
+    } else if ((c >= 0x30) && (c <= 0x39)) {
+      result = (c - 0x30) + 52;
+      
+    } else if (c === 0x2b) {
+      result = 62;
+      
+    } else if (c == 0x2f) {
+      result = 63;
+      
+    } else {
+      result = -1;
+    }
+    
+    // Return result
+    return result;
+  }
+  
+  /*
+   * Given an ArrayBuffer holding results that the client can download,
+   * and a suggested name for the result file, clear any current results
+   * and then show a results box with a download link.
+   *
+   * Parameters:
+   *
+   *   arb : ArrayBuffer - the result data
+   *
+   *   fname : string - the suggested file name
+   */
+  function giveResult(arb, fname) {
+    var func_name = "giveResult";
+    var obj, e;
+    
+    // Check parameters
+    if ((!(arb instanceof ArrayBuffer)) ||
+          (typeof(fname) !== "string")) {
+      fault(func_name, 100);
+    }
+    
+    // Clear any current results
+    closeResult();
+    
+    // Wrap the array buffer in a blob
+    obj = new Blob([arb], {"type": "application/octet-stream"});
+    
+    // Store an object URL to this result
+    m_result = URL.createObjectURL(obj);
+    
+    // Get the anchor element
+    e = document.getElementById("aDownload");
+    if (!e) {
+      fault(func_name, 200);
+    }
+    
+    // Set the target to a blank tab and set the download attribute with
+    // the suggested name
+    e.target = "_blank";
+    e.download = fname;
+    
+    // Set the link for the anchor element to the result URL
+    e.href = m_result;
+    
+    // Now display the result box
+    e = document.getElementById("divResult");
+    if (!e) {
+      fault(func_name, 300);
+    }
+    e.style.display = "block";
+  }
+  
+  /*
+   * Read the scrambling key from the input control and make sure it is
+   * valid.
+   *
+   * If there is an error, the appropriate error DIV is displayed.
+   *
+   * Return:
+   *
+   *   the scrambling key as a string or an empty string if there was an
+   *   error
+   */
+  function readKey() {
+    var func_name = "readKey";
+    var e, str, i, c;
+    
+    // Grab the input
+    e = document.getElementById("txtKey");
+    if (!e) {
+      fault(func_name, 100);
+    }
+    str = e.value;
+    
+    // Check the length
+    if ((str.length < 1) || (str.length > 255)) {
+      showError("divKeyError");
+      return "";
+    }
+    
+    // Check each character
+    for(i = 0; i < str.length; i++) {
+      if (decode64(str.charAt(i)) < 0) {
+        showError("divKeyError");
+        return "";
+      }
+    }
+    
+    // Return the checked string
+    return str;
+  }
+  
+  /*
+   * Grab the file object from the file input control, making sure the
+   * user selected exactly one file.
+   *
+   * If there is an error, the appropriate error DIV is displayed.
+   *
+   * Return:
+   *
+   *   the selected file object, or undefined if there was an error
+   */
+  function grabFile() {
+    var func_name = "grabFile";
+    var e, fil;
+    
+    // Get the file element
+    e = document.getElementById("uplInput");
+    if (!e) {
+      fault(func_name, 100);
+    }
+    
+    // Check that exactly one file selected
+    if (e.files.length !== 1) {
+      showError("divSelError");
+      return undefined;
+    }
+    
+    // Return the selected file
+    return e.files.item(0);
+  }
+  
+  /*
+   * Enable or disable the scramble and descramble buttons.
+   *
+   * This also sets or clears the m_suppress flag.
+   *
+   * The cancel button is enabled or disabled with the inverse state of
+   * the scramble and descramble buttons.
+   *
+   * Parameters:
+   *
+   *   en : boolean - true to enable them, false to disable
+   */
+  function buttonState(en) {
+    var func_name = "buttonState";
+    var e;
+    
+    // Check parameter
+    if (typeof(en) !== "boolean") {
+      fault(func_name, 100);
+    }
+    
+    // Update the suppress flag
+    if (en) {
+      m_suppress = false;
+    } else {
+      m_suppress = true;
+    }
+    
+    // Update the button states
+    e = document.getElementById("btnScramble");
+    if (!e) {
+      fault(func_name, 200);
+    }
+    e.disabled = m_suppress;
+    
+    e = document.getElementById("btnDescramble");
+    if (!e) {
+      fault(func_name, 300);
+    }
+    e.disabled = m_suppress;
+    
+    // Update cancel button state
+    e = document.getElementById("btnCancel");
+    if (!e) {
+      fault(func_name, 400);
+    }
+    if (m_suppress) {
+      e.disabled = false;
+    } else {
+      e.disabled = true;
+    }
+  }
+  
+  /*
+   * Show a specific error DIV.
+   *
+   * This first calls dismissError() to hide any error DIVs.  Then, it
+   * shows the error DIV with the given DIV id.  The given DIV id must
+   * be in the ERROR_DIVS array.
+   *
+   * Parameters:
+   *
+   *   divid : string - the ID of the error DIV to show
+   */
+  function showError(divid) {
+    var func_name = "showError";
+    var e, i, iFound;
+    
+    // Check parameter
+    if (typeof(divid) !== "string") {
+      fault(func_name, 100);
+    }
+    
+    // Check that DIV id is valid
+    iFound = false;
+    for(i = 0; i < ERROR_DIVS.length; i++) {
+      if (divid === ERROR_DIVS[i]) {
+        iFound = true;
+        break;
+      }
+    }
+    if (!iFound) {
+      fault(func_name, 101);
+    }
+    
+    // Hide all error DIVs
+    dismissError();
+    
+    // Show the requested error DIV
+    e = document.getElementById(divid);
+    if (!e) {
+      fault(func_name, 200);
+    }
+    e.style.display = "block";
+  }
+  
+  /*
+   * Called when the (de)scramble button is clicked.
+   *
+   * Parameters:
+   *
+   *   descramble : boolean - true if descrambling requested, false if
+   *   scrambling requested
+   */
+  function handleOperation(descramble) {
+    var func_name = "handleOperation";
+    var key, fil, fr, tname, working, ferr, retval, trb;
+    
+    // Ignore if suppressed
+    if (m_suppress) {
+      return;
+    }
+    
+    // Check state
+    if (m_fr || m_worker) {
+      fault(func_name, 50);
+    }
+    
+    // Check parameter
+    if (typeof(descramble) !== "boolean") {
+      fault(func_name, 100);
+    }
+    
+    // Hide any error DIVs
+    dismissError();
+    
+    // Read the key, stopping if we didn't read a valid one
+    key = readKey();
+    if (key.length < 1) {
+      return;
+    }
+    
+    // Grab the file object, stopping if we didn't get exactly one
+    fil = grabFile();
+    if (!fil) {
+      return;
+    }
+    
+    // Disable buttons and close out any results
+    buttonState(false);
+    closeResult();
+    
+    // Get ready to read the file
+    m_fr = new FileReader();
+    
+    // When the load operation finishes, whether successful or not, we
+    // want to re-enable all the buttons and clear the file reader state
+    // variable; if the working flag is true, don't re-enable the
+    // buttons yet, though
+    working = false;
+    m_fr.addEventListener('loadend', function(ev) {
+      m_fr = undefined;
+      if (!working) {
+        buttonState(true);
+      }
+    });
+    
+    // When the load operation fails due to an abort or an error, we
+    // want to display an appropriate error box
+    m_fr.addEventListener('abort', function(ev) {
+      showError("divAbortError");
+    });
+    
+    m_fr.addEventListener('error', function(ev) {
+      showError("divReadError");
+    });
+    
+    // Function will continue asynchronously in the load event when the
+    // file has successfully been loaded into memory
+    m_fr.addEventListener('load', function(ev) {
+      // Suggested target file name starts out as main file name
+      tname = fil.name;
+      
+      // If target file name is example, rename it to "data"
+      if (tname.length < 1) {
+        tname = "data";
+      }
+      
+      // Alter target file name depending on scrambling or descrambling
+      if (descramble) {
+        // Descrambling, so if target file name ends with ".warp64" and
+        // there is at least one character before it, drop that suffix
+        if (tname.length > WARP_SUFFIX.length) {
+          if (tname.slice(0 - WARP_SUFFIX.length) === WARP_SUFFIX) {
+            tname = tname.slice(0, 0 - WARP_SUFFIX.length);
+          }
+        }
+        
+      } else {
+        // Scrambling, so append suffix
+        tname = tname + WARP_SUFFIX;
+      }
+      
+      // Set the working flag
+      working = true;
+      
+      // Get the loaded ArrayBuffer
+      trb = m_fr.result;
+      
+      // Create a new worker thread
+      m_worker = new Worker("warp64.js");
+      
+      // Define an error function for handling worker errors
+      ferr = function(ev) {
+        // Only proceed if m_worker defined
+        if (m_worker) {
+          // Terminate worker and clear state
+          m_worker.terminate();
+          m_worker = undefined;
+          
+          // Show the error DIV and re-enable the buttons
+          showError("divProcError");
+          buttonState(true);
+        }
+      };
+      
+      // Handle worker errors with the error function
+      m_worker.addEventListener('error', ferr);
+      m_worker.addEventListener('messageerror', ferr);
+      
+      // Register an event handler to receive the worker's response
+      m_worker.onmessage = function(ev) {
+        
+        // Get the return value and check it
+        retval = ev.data;
+        if (typeof(retval) !== "object") {
+          fault(func_name, 900);
+        }
+        if (!("status" in retval)) {
+          fault(func_name, 901);
+        }
+        if (typeof(retval.status) !== "boolean") {
+          fault(func_name, 902);
+        }
+        if (retval.status) {
+          if (!("data" in retval)) {
+            fault(func_name, 903);
+          }
+          if (!(retval.data instanceof ArrayBuffer)) {
+            fault(func_name, 904);
+          }
+          
+        } else {
+          if (!("errDiv" in retval)) {
+            fault(func_name, 905);
+          }
+          if (typeof(retval.errDiv) !== "string") {
+            fault(func_name, 906);
+          }
+        }
+        
+        // Terminate worker and clear state
+        m_worker.terminate();
+        m_worker = undefined;
+        
+        // If success, give the user their result, else show the
+        // appropriate error
+        if (retval.status) {
+          giveResult(retval.data, tname);
+        } else {
+          showError(retval.errDiv);
+        }
+        
+        // Re-enable the buttons
+        buttonState(true);
+      };
+
+      // Finally, asynchronously post a message to the worker that
+      // contains whether we are descrambling, what the key is, and the
+      // data that we just loaded; furthermore, transfer the loaded data
+      // to the thread
+      m_worker.postMessage({
+        "descramble": descramble,
+        "key": key,
+        "data": trb
+      }, [trb]);
+    });
+    
+    // Finally, start the operation to read the file asynchronously into
+    // a binary array buffer
+    m_fr.readAsArrayBuffer(fil);
+  }
+  
+  /*
+   * Called when the cancel button is invoked.
+   *
+   * If there is a currently active worker, the worker is terminated and
+   * cleared, an appropriate error DIV is displayed, and the buttons are
+   * re-enabled.
+   *
+   * If there is no currently active worker but there is an active file
+   * reader, the file reader is canceled.
+   */
+  function handleCancel() {
+    // Handle depending on state
+    if (m_worker) {
+      // We have an active worker, so terminate and clear the worker
+      // state
+      m_worker.terminate();
+      m_worker = undefined;
+      
+      // Show the stop error DIV and re-enable the buttons
+      showError("divStopError");
+      buttonState(true);
+    
+    } else if (m_fr) {
+      // We don't have a worker but we have a file reading operation, so
+      // cancel that
+      m_fr.abort();
+    }
+  }
+  
+  /*
+   * Public functions
+   * ================
+   */
+  
+  /*
+   * Called when "Close" is clicked in the result box, or when you want
+   * to clear out any currently displayed result and revoke any current
+   * object URL for results.
+   *
+   * This hides the results and also revokes any object URLs and links
+   * that might be currenlty active.
+   */
+  function closeResult() {
+    var func_name = "closeResult";
+    var e;
+    
+    // Hide the result box
+    e = document.getElementById("divResult");
+    if (!e) {
+      fault(func_name, 100);
+    }
+    e.style.display = "none";
+    
+    // Clear the donwload link
+    e = document.getElementById("aDownload");
+    if (!e) {
+      fault(func_name, 101);
+    }
+    e.href = "javascript:void(0);";
+    
+    // If there is a result object URL, revoke it and clear it
+    if (m_result) {
+      URL.revokeObjectURL(m_result);
+      m_result = "";
+    }
+  }
+  
+  /*
+   * Called when a "Dismiss" link in an error box is visited, or when
+   * you want to make sure no error DIVs are being displayed.
+   */
+  function dismissError() {
+    var func_name = "dismissError";
+    var e, i;
+    
+    for(i = 0; i < ERROR_DIVS.length; i++) {
+      e = document.getElementById(ERROR_DIVS[i]);
+      if (!e) {
+        fault(func_name, 100);
+      }
+      e.style.display = "none";
+    }
+  }
+  
+  /*
+   * Called when the page loads.
+   */
+  function handleLoad() {
+    var func_name = "handleLoad";
+    var e;
+    
+    // Connect the buttons to their handlers
+    e = document.getElementById("btnScramble");
+    if (!e) {
+      fault(func_name, 100);
+    }
+    e.addEventListener('click', function(ev) {
+      handleOperation(false);
+    });
+    
+    e = document.getElementById("btnDescramble");
+    if (!e) {
+      fault(func_name, 101);
+    }
+    e.addEventListener('click', function(ev) {
+      handleOperation(true);
+    });
+    
+    e = document.getElementById("btnCancel");
+    if (!e) {
+      fault(func_name, 200);
+    }
+    e.addEventListener('click', function(ev) {
+      handleCancel();
+    });
+    
+    // Make sure the buttons are enabled and make sure results are
+    // closed
+    buttonState(true);
+    closeResult();
+  }
+  
+  /*
+   * Export declarations
+   * ===================
+   * 
+   * All exports are declared within a global "warp64" object.
+   */
+  
+  window.warp64 = {
+    "closeResult": closeResult,
+    "dismissError": dismissError,
+    "handleLoad": handleLoad
+  };  
+  
+}());
+
+// Call into our load handler once DOM is ready
+document.addEventListener('DOMContentLoaded', warp64.handleLoad);
+    
+    </script>
+  </head>
+  <body>
+    
+    <!-- Heading -->
+    <h1>Warp64</h1>
+    
+    <!-- Control input -->
+    <div class="clsLabel">Scrambling key:</div>
+    <div class="clsControl">
+      <input type="password" id="txtKey"/>
+    </div>
+    
+    <div class="clsLabel">Input file:</div>
+    <div class="clsControl">
+      <input type="file" id="uplInput"/>
+    </div>
+    
+    <!-- Error message boxes -->
+    <noscript>
+      <div class="clsErrorBox">
+        <div class="clsErrorMessage">JavaScript is required!</div>
+        <div class="clsErrorDesc">JavaScript must be enabled for this
+        web application to work!</div>
+      </div>
+    </noscript>
+    <div id="divKeyError" class="clsErrorBox" style="display: none;">
+      <div class="clsErrorMessage">Invalid scrambling key!</div>
+      <div class="clsErrorDesc">Scrambling keys must:</div>
+      <ul>
+        <li>Be at least one character</li>
+        <li>Be at most 255 characters</li>
+        <li>
+          Only include
+          <span class="tt">A-Z</span>
+          <span class="tt">a-z</span>
+          <span class="tt">0-9</span>
+          <span class="tt">+</span>
+          <span class="tt">/</span>
+        </li>
+      </ul>
+      <div class="clsCloseError">
+        <a href="javascript:void(warp64.dismissError());">Dismiss</a>
+      </div>
+    </div>
+    <div id="divWrongError" class="clsErrorBox" style="display: none;">
+      <div class="clsErrorMessage">Wrong scrambling key!</div>
+      <div class="clsErrorDesc">The file could not be descrambled 
+      because the wrong scrambling key was provided.</div>
+      <div class="clsCloseError">
+        <a href="javascript:void(warp64.dismissError());">Dismiss</a>
+      </div>
+    </div>
+    <div id="divBadError" class="clsErrorBox" style="display: none;">
+      <div class="clsErrorMessage">Invalid file!</div>
+      <div class="clsErrorDesc">The provided file must have at least
+      three bytes to descramble it.</div>
+      <div class="clsErrorDesc">Check that you did not accidentally
+      choose to descramble when you actually wanted to scramble.</div>
+      <div class="clsCloseError">
+        <a href="javascript:void(warp64.dismissError());">Dismiss</a>
+      </div>
+    </div>
+    <div id="divSelError" class="clsErrorBox" style="display: none;">
+      <div class="clsErrorMessage">Invalid file selection!</div>
+      <div class="clsErrorDesc">Select exactly one input file.</div>
+      <div class="clsCloseError">
+        <a href="javascript:void(warp64.dismissError());">Dismiss</a>
+      </div>
+    </div>
+    <div id="divAbortError" class="clsErrorBox" style="display: none;">
+      <div class="clsErrorMessage">File reading interrupted!</div>
+      <div class="clsErrorDesc">Failed to read the input file into
+      memory because the operation was canceled.</div>
+      <div class="clsCloseError">
+        <a href="javascript:void(warp64.dismissError());">Dismiss</a>
+      </div>
+    </div>
+    <div id="divReadError" class="clsErrorBox" style="display: none;">
+      <div class="clsErrorMessage">File reading error!</div>
+      <div class="clsErrorDesc">Failed to read the input file into
+      memory.</div>
+      <div class="clsCloseError">
+        <a href="javascript:void(warp64.dismissError());">Dismiss</a>
+      </div>
+    </div>
+    <div id="divStopError" class="clsErrorBox" style="display: none;">
+      <div class="clsErrorMessage">Operation interrupted!</div>
+      <div class="clsErrorDesc">Failed to complete operation because it
+      was interrupted.</div>
+      <div class="clsCloseError">
+        <a href="javascript:void(warp64.dismissError());">Dismiss</a>
+      </div>
+    </div>
+    <div id="divProcError" class="clsErrorBox" style="display: none;">
+      <div class="clsErrorMessage">Operation error!</div>
+      <div class="clsErrorDesc">An internal error occurred during the
+      operation.</div>
+      <div class="clsCloseError">
+        <a href="javascript:void(warp64.dismissError());">Dismiss</a>
+      </div>
+    </div>
+    
+    <!-- Control panel -->
+    <div class="clsPanel">
+      <input type="button" id="btnScramble" value="Scramble"/>
+      <input type="button" id="btnDescramble" value="Descramble"/>
+      <input type="button" id="btnCancel" value="Cancel" disabled/>
+    </div>
+    
+    <!-- Result box -->
+    <div id="divResult" style="display: none;">
+      <a href="javascript:void(0);" id="aDownload">Download result</a>
+      <div id="divCloseResult">
+        <a href="javascript:void(warp64.closeResult());">Close</a>
+      </div>
+    </div>
+    
+  </body>
+</html>
